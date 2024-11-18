@@ -1,6 +1,7 @@
 import json
 import os
 import requests
+from datetime import datetime
 
 from github import Github
 
@@ -18,6 +19,16 @@ def load_template(filename):
     template_path = os.path.join(".github/workflows", filename)
     with open(template_path, "r") as f:
         return f.read()
+
+
+def get_changed_files_dump(sha, repo):
+    changed_files = []
+    commit = repo.get_commit(sha)
+    # Loop through the changed files in the commit
+    for file in commit.files:
+        if file.filename.startswith("docs/"):  # Filter by docs/** folder
+            changed_files.append(file.filename)
+    return json.dumps({"changed_files": changed_files})
 
 
 def find_pr_by_sha(repo, sha):
@@ -42,33 +53,63 @@ def main():
     graphql_endpoint = "https://api.management.inkeep.com/graphql"
 
     # Your GraphQL mutation
-    graphql_mutation = """
+    create_source_sync_job_mutation = """
     mutation CreateSourceSyncJob($sourceId: ID!, $type: SourceSyncJobType!) {
-    createSourceSyncJob(input: {sourceId: $sourceId, type: $type}) {
-        success
-    }
-    }
-    """
-
-    graphql_query = """
-    query source($sourceId: ID!) {
-        source(sourceId: $sourceId) {
-            displayName
+        createSourceSyncJob(input: {sourceId: $sourceId, type: $type}) {
+            job{
+                id
+            }
+            success
         }
     }
     """
+
+    create_indexing_job_mutation = """
+    mutation CreateIndexingJob($indexId: ID! $sourceSyncJobId: ID! $statusMessage: String! $startTime: DateTime!){
+        createIndexingJob(input:{
+                indexId: $indexId
+                sourceSyncJobId: $sourceSyncJobId
+                job: {
+                    startTime: $startTime
+                    status: QUEUED
+                    statusMessage: $statusMessage
+                }
+        }){
+            success
+        }
+    }
+    """
+
+    get_source_query = """
+    query source($sourceId: ID!) {
+        source(sourceId: $sourceId) {
+            displayName
+            indexes {
+                id
+            }
+        }
+    }
+    """
+
+    gh = Github(os.getenv("GITHUB_TOKEN"))
+    event = read_json(os.getenv("GITHUB_EVENT_PATH"))
+    repo = gh.get_repo(event["repository"]["full_name"])
+    sha = event.get("after")  # The commit SHA from the push event
+    files_changed_str = get_changed_files_dump(sha, repo)
+    source_id = get_actions_input("sourceId")
+    api_key = get_actions_input("apiKey")
 
     source_id = get_actions_input("sourceId")
     api_key = get_actions_input("apiKey")
 
     # Prepare the JSON payload
-    json_payload = {
-        "query": graphql_mutation,
+    create_source_sync_job_payload = {
+        "query": create_source_sync_job_mutation,
         "variables": {"sourceId": source_id, "type": "INCREMENTAL"},
     }
 
-    query_payload = {
-        "query": graphql_query,
+    get_source_payload = {
+        "query": get_source_query,
         "variables": {"sourceId": source_id},
     }
 
@@ -76,31 +117,52 @@ def main():
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"}
 
     # Make the GraphQL request
-    mutation_response = requests.post(
-        graphql_endpoint, headers=headers, json=json_payload
+    create_source_sync_job_muation_result = requests.post(
+        graphql_endpoint, headers=headers, json=create_source_sync_job_payload
     )
 
-    mutation_result = mutation_response.json()
-    print(mutation_result)
+    create_source_sync_job_mutation_result = (
+        create_source_sync_job_muation_result.json()
+    )
+
+    source_sync_job_id = create_source_sync_job_mutation_result["data"][
+        "createSourceSyncJob"
+    ]["job"]["id"]
 
     query_response = requests.post(
-        graphql_endpoint, headers=headers, json=query_payload
+        graphql_endpoint, headers=headers, json=get_source_payload
     )
 
-    print(query_response.json())
-
     display_name = query_response.json()["data"]["source"]["displayName"]
+    indexes = query_response.json()["data"]["source"]["indexes"]
+    if not indexes:
+        raise Exception("No indexes found.")
+
+    index_id = query_response.json()["data"]["source"]["indexes"][0]["id"]
+
+    create_indexing_job_payload = {
+        "query": create_indexing_job_mutation,
+        "variables": {
+            "indexId": index_id,
+            "statusMessage": files_changed_str,
+            "startTime": datetime.utcnow().replace(microsecond=0).isoformat() + "Z",
+            "sourceSyncJobId": source_sync_job_id,
+        },
+    }
+
+    create_indexing_job_response = requests.post(
+        graphql_endpoint, headers=headers, json=create_indexing_job_payload
+    )
 
     if (
-        "data" in mutation_result.keys()
-        and "createSourceSyncJob" in mutation_result["data"].keys()
-        and mutation_result["data"]["createSourceSyncJob"]["success"] is True
+        "data" in create_source_sync_job_mutation_result.keys()
+        and "createSourceSyncJob"
+        in create_source_sync_job_mutation_result["data"].keys()
+        and create_source_sync_job_mutation_result["data"]["createSourceSyncJob"][
+            "success"
+        ]
+        is True
     ):
-        gh = Github(os.getenv("GITHUB_TOKEN"))
-        event = read_json(os.getenv("GITHUB_EVENT_PATH"))
-        repo = gh.get_repo(event["repository"]["full_name"])
-        sha = event.get("after")  # The commit SHA from the push event
-
         pr = find_pr_by_sha(repo, sha)
         if pr is None:
             print(f"No PR found for commit {sha}.")
