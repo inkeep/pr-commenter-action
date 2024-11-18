@@ -33,7 +33,7 @@ jobs:
               - 'docs/**'
       - name: Sync Docs Source 
         if: steps.changes.outputs.docs == 'true'
-        uses: inkeep/pr-commenter-action@v10
+        uses: inkeep/pr-commenter-action@v11
         env: 
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
