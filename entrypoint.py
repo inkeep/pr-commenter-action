@@ -21,23 +21,11 @@ def load_template(filename):
         return f.read()
 
 
-def get_changed_files_dump(sha, repo):
-    changed_files = []
-    commit = repo.get_commit(sha)
-    # Loop through the changed files in the commit
-    for file in commit.files:
-        if file.filename.startswith("docs/"):  # Filter by docs/** folder
-            changed_files.append(file.filename)
-    return json.dumps({"changed_files": changed_files})
-
-
 def find_pr_by_sha(repo, sha):
     """Find a PR by commit SHA.
-
     Parameters:
     - repo: The repository object from PyGithub.
     - sha: The commit SHA to search for in PRs.
-
     Returns:
     - The pull request object if found, otherwise None.
     """
@@ -48,19 +36,27 @@ def find_pr_by_sha(repo, sha):
     return None
 
 
+def get_changed_files_dump(sha, repo):
+    changed_files = []
+    commit = repo.get_commit(sha)
+    # Loop through the changed files in the commit
+    for file in commit.files:
+        if file.filename.startswith("docs/"):  # Filter by docs/** folder
+            changed_files.append(file.filename)
+    return json.dumps({"changed_files": changed_files})
+
+
 def main():
-
     graphql_endpoint = "https://api.management.inkeep.com/graphql"
-
     # Your GraphQL mutation
-    create_source_sync_job_mutation = """
+    create_source_sync_mutation = """
     mutation CreateSourceSyncJob($sourceId: ID!, $type: SourceSyncJobType!) {
         createSourceSyncJob(input: {sourceId: $sourceId, type: $type}) {
-            job{
-                id
+                job{
+                    id
+                }
+                success
             }
-            success
-        }
     }
     """
 
@@ -90,7 +86,6 @@ def main():
         }
     }
     """
-
     gh = Github(os.getenv("GITHUB_TOKEN"))
     event = read_json(os.getenv("GITHUB_EVENT_PATH"))
     repo = gh.get_repo(event["repository"]["full_name"])
@@ -99,33 +94,34 @@ def main():
     source_id = get_actions_input("sourceId")
     api_key = get_actions_input("apiKey")
 
-    source_id = get_actions_input("sourceId")
-    api_key = get_actions_input("apiKey")
-
     # Prepare the JSON payload
     create_source_sync_job_payload = {
-        "query": create_source_sync_job_mutation,
-        "variables": {"sourceId": source_id, "type": "INCREMENTAL"},
+        "query": create_source_sync_mutation,
+        "variables": {
+            "sourceId": source_id,
+            "type": "INCREMENTAL",
+            "statusMessage": files_changed_str,
+        },
     }
 
     get_source_payload = {
         "query": get_source_query,
         "variables": {"sourceId": source_id},
     }
-
     # Headers including the Authorization token
-    headers = {"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"}
-
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {api_key}",
+        "Imitated-Organization-Alias": "inkeepdev",
+    }
     # Make the GraphQL request
-    create_source_sync_job_muation_result = requests.post(
+    create_source_sync_job_response = requests.post(
         graphql_endpoint, headers=headers, json=create_source_sync_job_payload
     )
 
-    create_source_sync_job_mutation_result = (
-        create_source_sync_job_muation_result.json()
-    )
+    create_source_sync_mutation_result = create_source_sync_job_response.json()
 
-    source_sync_job_id = create_source_sync_job_mutation_result["data"][
+    source_sync_job_id = create_source_sync_mutation_result["data"][
         "createSourceSyncJob"
     ]["job"]["id"]
 
@@ -140,6 +136,7 @@ def main():
 
     index_id = query_response.json()["data"]["source"]["indexes"][0]["id"]
 
+    print("files changed: ", files_changed_str)
     create_indexing_job_payload = {
         "query": create_indexing_job_mutation,
         "variables": {
@@ -154,28 +151,24 @@ def main():
         graphql_endpoint, headers=headers, json=create_indexing_job_payload
     )
 
+    print(create_indexing_job_response.json())
+
     if (
-        "data" in create_source_sync_job_mutation_result.keys()
-        and "createSourceSyncJob"
-        in create_source_sync_job_mutation_result["data"].keys()
-        and create_source_sync_job_mutation_result["data"]["createSourceSyncJob"][
-            "success"
-        ]
+        "data" in create_source_sync_mutation_result.keys()
+        and "createSourceSyncJob" in create_source_sync_mutation_result["data"].keys()
+        and create_source_sync_mutation_result["data"]["createSourceSyncJob"]["success"]
         is True
     ):
         pr = find_pr_by_sha(repo, sha)
         if pr is None:
             print(f"No PR found for commit {sha}.")
             return
-
         new_comment = f""":mag_right::speech_balloon: [Inkeep](https://inkeep.com) AI search and chat service is syncing content for source '{display_name}'"""
-
         # Check for duplicated comment
         old_comments = [c.body for c in pr.get_issue_comments()]
         if new_comment in old_comments:
             print("This pull request already has a duplicated comment.")
             return
-
         # Add the comment
         pr.create_issue_comment(new_comment)
 
