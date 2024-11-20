@@ -26,7 +26,9 @@ def get_changed_files_dump(sha, repo):
     commit = repo.get_commit(sha)
     # Loop through the changed files in the commit
     for file in commit.files:
-        if file.filename.startswith("docs/"):  # Filter by docs/** folder
+        if (
+            file.filename.startswith("docs/") or "marketing/src/blog" in file.filename
+        ):  # Filter by docs/** folder
             changed_files.append(file.filename)
     return json.dumps({"changed_files": changed_files})
 
