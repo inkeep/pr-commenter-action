@@ -57,7 +57,7 @@ def main():
     # Your GraphQL mutation
     create_source_sync_job_mutation = """
     mutation CreateSourceSyncJob($sourceId: ID!, $type: SourceSyncJobType!) {
-        createSourceSyncJob(input: {sourceId: $sourceId, type: $type}) {
+        createSourceSyncJob(input: {sourceId: $sourceId, type: $type origin: GITHUB_ACTION}) {
             job{
                 id
             }
